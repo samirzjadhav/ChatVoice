@@ -26,6 +26,7 @@ def parse_version(v):
 class Updater(QObject):
     found = Signal(object)        # {"version", "page", "asset", "digest", "notes"}
     message = Signal(str)
+    status = Signal(str)          # manual check: nothing to install, or the check failed
     progress = Signal(str)
     quit_now = Signal()
     _evt = Signal(str, object)    # from worker threads
@@ -56,14 +57,16 @@ class Updater(QObject):
             self.s.set("update_last", int(time.time()))
             tag = d.get("tag_name", "")
             if parse_version(tag) <= parse_version(VERSION):
-                self._evt.emit("note", "You have the newest version (%s)" % VERSION if manual else "")
+                if manual:
+                    self._evt.emit("status", "There is not any update at all. Wait for the devs to update the app.")
                 return
             asset = next((a for a in d.get("assets", []) if a.get("name", "").lower().endswith("setup.exe")), None)
             self._evt.emit("found", {"version": tag.lstrip("v"), "page": d.get("html_url", ""),
                                      "asset": asset.get("browser_download_url", "") if asset else "",
                                      "digest": (asset or {}).get("digest", ""), "notes": (d.get("body") or "")[:300]})
         except Exception as e:
-            self._evt.emit("note", ("Could not check for updates (%s)" % str(e)[:60]) if manual else "")
+            if manual:
+                self._evt.emit("status", "Could not check for updates (%s)" % str(e)[:60])
         finally:
             self._evt.emit("idle", None)
 
@@ -114,6 +117,8 @@ class Updater(QObject):
             self.found.emit(data)
         elif kind == "note" and data:
             self.message.emit(data)
+        elif kind == "status" and data:
+            self.status.emit(data)
         elif kind == "progress":
             self.progress.emit(data)
         elif kind == "idle":

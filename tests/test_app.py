@@ -256,7 +256,7 @@ ok(not launched and "did not match" in w.feed.toPlainText(), "corrupted download
 w.updater.install({"version": "9.9.9", "asset": "http://evil.example/x.exe"}); wait(200)
 ok(not launched and "not from your GitHub repository" in w.feed.toPlainText(), "update file from anywhere except your repository is refused")
 GH["tag"] = "v0.0.1"; w.banner.hide(); w.updater.check(True); wait(800)
-ok(not w.banner.isVisible() and "newest version" in w.feed.toPlainText(), "already up to date -> no banner, friendly note")
+ok(w.banner.isVisible() and not w.upd_btn.isVisible() and "not any update" in w.banner_text.text(), "already up to date -> banner says there is no update")
 w.s.set("update_last", 0); w.s.set("auto_update_check", False); w.banner.hide(); GH["tag"] = "v9.9.9"; w._auto_update(); wait(400)
 ok(not w.banner.isVisible(), "automatic check can be switched off")
 

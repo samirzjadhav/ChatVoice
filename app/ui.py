@@ -178,6 +178,7 @@ class MainWindow(QWidget):
         self.ytmod.notice.connect(lambda t: self.feed.append("<span style='color:#ff8a5c'>YouTube mod: %s</span>" % esc(t)))
         QTimer.singleShot(2500, self.poller.apply)
         self.updater.found.connect(self._update_found)
+        self.updater.status.connect(self._update_status)
         self.updater.message.connect(lambda t: self.feed.append("<span style='color:#7cf0c0'>Update: %s</span>" % esc(t)))
         self.updater.progress.connect(self.banner_text.setText)
         self.updater.quit_now.connect(lambda: QTimer.singleShot(400, QApplication.quit))
@@ -246,6 +247,7 @@ class MainWindow(QWidget):
         lay = QHBoxLayout(b)
         lay.setContentsMargins(16, 8, 12, 8)
         self.banner_text = QLabel("")
+        self.banner_text.setWordWrap(True)
         lay.addWidget(self.banner_text, 1)
         self.upd_btn = QPushButton("Update now")
         self.upd_btn.setObjectName("primary")
@@ -260,6 +262,14 @@ class MainWindow(QWidget):
     def _update_found(self, info):
         self.pending_update = info
         self.banner_text.setText("A new version is available: %s (you have %s)" % (info["version"], VERSION))
+        self.upd_btn.setEnabled(True)
+        self.upd_btn.show()
+        self.banner.show()
+
+    def _update_status(self, text):
+        self.pending_update = None
+        self.banner_text.setText(text)
+        self.upd_btn.hide()
         self.banner.show()
 
     def _update_now(self):
