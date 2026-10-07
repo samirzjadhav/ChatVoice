@@ -7,6 +7,14 @@ const env = { KV, DISCORD_CLIENT_ID: "CID", DISCORD_CLIENT_SECRET: "SEC", DISCOR
 const puts = [];
 let memberOk = true, roleStatus = 204;
 let invitesNow = [], membersNow = [], invitesStatus = 200, membersStatus = 200, memberCalls = 0;
+let roleSeq = 200001, inviteSeq = 1;
+const rolesNow = [
+  { id: "1", name: "@everyone", position: 0 },
+  { id: "100001", name: "Verified", position: 3 },
+  { id: "100002", name: "Regular", position: 2 },
+  { id: "100003", name: "Supporter", position: 4 },
+  { id: "9", name: "BotRole", managed: true, position: 5 },
+];
 const putsFull = [];
 
 globalThis.fetch = async (url, init = {}) => {
@@ -17,9 +25,23 @@ globalThis.fetch = async (url, init = {}) => {
     if (body.get("client_secret") === "BAD") return j({ error: "invalid_client" }, 401);
     return body.get("redirect_uri").includes("/setup/") ? j({ access_token: "AT", guild: { id: "G1", name: "Test Server" } }) : j({ access_token: "AT2" });
   }
+  if (p === "/users/@me" && String(init.headers?.Authorization || "").startsWith("Bot ")) return j({ id: "BOT1", username: "chatvoice", global_name: "ChatVoice" });
   if (p === "/users/@me") return j({ id: "U1", username: "rahul", global_name: "Rahul" });
+  if (p === "/guilds/G1" && m === "GET") return j({ id: "G1", name: "Test Server" });
   if (p === "/guilds/G1/members/U1" && m === "GET") return memberOk ? j({ user: { id: "U1" } }) : j({}, 404);
-  if (p === "/guilds/G1/roles") return j([{ id: "1", name: "@everyone", position: 0 }, { id: "100001", name: "Verified", position: 3 }, { id: "100002", name: "Regular", position: 2 }, { id: "100003", name: "Supporter", position: 4 }, { id: "9", name: "BotRole", managed: true, position: 5 }]);
+  if (p === "/guilds/G1/roles" && m === "GET") return j(rolesNow);
+  if (p === "/guilds/G1/roles" && m === "POST") {
+    const body = JSON.parse(init.body || "{}");
+    const role = { id: String(roleSeq++), name: body.name || "Viewer", position: 1 };
+    rolesNow.push(role);
+    return j(role, 200);
+  }
+  if (p === "/guilds/G1/channels" && m === "GET") return j([{ id: "C1", name: "general", type: 0, position: 0 }, { id: "CAT", name: "Category", type: 4, position: 1 }]);
+  if (p === "/channels/C1/invites" && m === "POST") {
+    const invite = { code: "AUTO" + inviteSeq++, uses: 0, channel: { id: "C1", name: "general" } };
+    invitesNow.push(invite);
+    return j(invite, 200);
+  }
   if (m === "PUT" && /^\/guilds\/G1\/members\/\w+\/roles\/\w+$/.test(p)) { const [, , , , u, , r] = p.split("/"); puts.push(r); putsFull.push(u + ":" + r); return new Response(null, { status: roleStatus }); }
   if (p === "/guilds/G1/invites") return invitesStatus === 200 ? j(invitesNow) : j({}, invitesStatus);
   if (p === "/guilds/G1/members") { memberCalls++; return membersStatus === 200 ? j(membersNow) : j({}, membersStatus); }
@@ -33,7 +55,7 @@ const stateFrom = (res) => new URL(res.headers.get("location")).searchParams.get
 
 // 1. bot setup
 let r = await call("/setup");
-ok(r.status === 302 && r.headers.get("location").includes("permissions=268435488"), "setup redirects to Discord with Manage Roles");
+ok(r.status === 302 && r.headers.get("location").includes("permissions=268435489"), "setup requests Manage Server + Manage Roles + Create Instant Invite");
 r = await call("/setup/callback?code=abc&state=" + stateFrom(r));
 let html = await r.text();
 const token = html.match(/<code>([a-z0-9]{40})<\/code>/)?.[1];
@@ -49,6 +71,16 @@ r = await call("/api/config", { method: "PUT", headers: H, body: JSON.stringify(
 ok((await r.json()).ok, "config saved");
 r = await call("/api/config", { method: "PUT", headers: H, body: JSON.stringify({ verifiedRole: "evil" }) }); ok(r.status === 400, "bad role id rejected");
 
+// 2b. bot health + automatic viewer role/invite creation
+r = await call("/api/bot-status", { headers: H }); let res = await r.json();
+ok(res.connected && res.botName === "ChatVoice", "bot status confirms the bot is still in the server");
+r = await call("/api/channels", { headers: H }); res = await r.json();
+ok(res.channels.length === 1 && res.channels[0].name === "general", "text channels are listed for invite creation");
+r = await call("/api/invite-setup", { method: "POST", headers: H, body: JSON.stringify({ platform: "youtube", channelId: "C1" }) }); res = await r.json();
+ok(res.ok && res.role.name === "YouTube Viewer" && res.inviteUrl === "https://discord.gg/AUTO1", "YouTube viewer role and invite are created automatically");
+r = await call("/api/invite-setup", { method: "POST", headers: H, body: JSON.stringify({ platform: "youtube", channelId: "C1" }) }); res = await r.json();
+ok(res.ok && res.reused && res.inviteUrl.endsWith("AUTO1"), "existing viewer role/invite is reused instead of duplicated");
+
 // 3. viewer link flow
 r = await call("/link/G1"); ok(r.status === 302, "link page redirects to Discord login");
 const lstate = stateFrom(r);
@@ -62,7 +94,7 @@ ok(code, "viewer gets a code: " + code);
 // 4. app claims the code from chat
 r = await call("/api/claim", { method: "POST", headers: H, body: JSON.stringify({ code: "ZZZZ-ZZZZ", platform: "youtube", uid: "UC1" }) }); ok(r.status === 404, "unknown code rejected");
 r = await call("/api/claim", { method: "POST", headers: H, body: JSON.stringify({ code, platform: "youtube", uid: "UC1" }) });
-let res = await r.json(); ok(res.ok && res.roleGranted && res.discordName === "Rahul", "claim links the account and grants Verified");
+res = await r.json(); ok(res.ok && res.roleGranted && res.discordName === "Rahul", "claim links the account and grants Verified");
 ok(puts.includes("100001"), "Discord got Verified role request");
 r = await call("/api/claim", { method: "POST", headers: H, body: JSON.stringify({ code, platform: "youtube", uid: "UC2" }) }); ok(r.status === 404, "code is single-use");
 r = await call("/api/links", { headers: H }); ok((await r.json()).keys[0] === "youtube:UC1", "links list returned to the app");

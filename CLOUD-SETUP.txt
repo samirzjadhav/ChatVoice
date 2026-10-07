@@ -39,14 +39,15 @@ F. CHECK
 
 EACH STREAMER  (ChatVoice > Discord page)
 1. Paste the cloud address. Click "Add bot to my server", choose the server, Authorize.
-   The bot asks for two permissions: Manage Roles (to give roles) and Manage Server (only to see how many times each
-   invite was used). If you added the bot before this version, add it again so it gets Manage Server.
+   The bot asks for three permissions: Manage Roles (to create/give viewer roles), Manage Server (to read invite usage),
+   and Create Instant Invite (to create the viewer invite links automatically). If you added the bot before this version,
+   add it again so it receives the new permission.
 2. Copy the SERVER KEY shown after authorizing into ChatVoice, click "Test connection".
 3. In Discord: Server Settings > Roles: drag the "ChatVoice" role ABOVE the roles it should give.
 4. ROLES FROM INVITE LINKS (recommended, no login page, nothing looks suspicious to viewers):
-   - In Discord: Invite People > Edit invite link > Expire: Never, Max uses: No limit. Make one per place
-     (one for YouTube, one for Twitch, one for Kick).
-   - In ChatVoice > Discord > section 2: paste each invite, pick the role, "Save invite roles", then "Check now".
+   - In ChatVoice > Discord > Viewer invite roles, optionally choose a channel and click "Create role + invite" for
+     YouTube, Twitch and Kick. ChatVoice creates the matching viewer role and a never-expiring, unlimited invite.
+   - You can still paste an existing Discord invite and select an existing role manually, then use "Save invite rules".
    - Put the YouTube invite in your video description / pinned comment. Whoever joins through it gets the YouTube role.
    - Every 2 minutes the cloud sees which invite was used and gives the matching role.
 5. Optional chat-activity roles (Regular / Supporter) use the link page (viewers log in with Discord once).

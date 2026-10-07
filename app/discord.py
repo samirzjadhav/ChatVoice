@@ -1,4 +1,4 @@
-"""Discord side of ChatVoice: cloud calls, !link claims, activity reporting, webhook posts."""
+"""Discord side of ChatVoice: cloud calls, !link claims, activity reporting, and webhook posts."""
 import json
 import re
 import threading
@@ -7,6 +7,8 @@ import urllib.error
 import urllib.request
 
 from PySide6.QtCore import QObject, Signal
+
+from .platforms import youtube_id
 
 LINK_RX = re.compile(r"^!link\s+([A-Za-z0-9]{4}-[A-Za-z0-9]{4})\s*$", re.I)
 UA = "ChatVoice/0.2 (+desktop app)"
@@ -63,17 +65,53 @@ class Cloud:
                       "Content-Type": "application/json", "User-Agent": UA}, body if method != "GET" else None)
 
 
-def post_webhook(url, content):
+def post_webhook(url, content="", embed=None):
+    """Post either simple content or a Discord embed to a webhook."""
     url = (url or "").strip()
     if not re.match(r"^https://(?:canary\.|ptb\.)?discord(?:app)?\.com/api/webhooks/", url):
         return {"error": "That does not look like a Discord webhook link"}
-    res = _http("POST", url, {"Content-Type": "application/json", "User-Agent": UA},
-                {"content": content[:1900], "username": "ChatVoice", "allowed_mentions": {"parse": []}})
+    payload = {
+        "username": "ChatVoice",
+        "allowed_mentions": {"parse": []},
+    }
+    if content:
+        payload["content"] = content[:1900]
+    if embed:
+        payload["embeds"] = [embed]
+    res = _http("POST", url, {"Content-Type": "application/json", "User-Agent": UA}, payload)
     return res
 
 
+def normalize_youtube_url(value):
+    """Return a normal YouTube watch URL when the input is a video/live URL or 11-char ID."""
+    value = (value or "").strip()
+    if not value:
+        return ""
+    vid = youtube_id(value)
+    return "https://www.youtube.com/watch?v=%s" % vid if vid else value
+
+
+def post_live_announcement(url, message, youtube_link):
+    """Post a rich live announcement with a clickable YouTube embed and custom message."""
+    link = normalize_youtube_url(youtube_link)
+    if not link:
+        return {"error": "Enter a YouTube live link or video ID first"}
+    msg = (message or "I'm live! Come hang out").strip()
+    embed = {
+        "title": "🔴 LIVE NOW",
+        "description": msg[:4096],
+        "url": link,
+        "color": 0xFF0000,
+        "fields": [
+            {"name": "Watch on YouTube", "value": "[▶ Open the live stream](%s)" % link, "inline": False}
+        ],
+        "footer": {"text": "ChatVoice • Live announcement"},
+    }
+    return post_webhook(url, embed=embed)
+
+
 class LinkManager(QObject):
-    """Handles '!link CODE' in chat. Counts linked viewers' messages locally and asks the cloud for a role
+    """Handles '!link CODE' in chat. Counts linked viewers locally and asks the cloud for a role
     only when a viewer reaches a threshold (so almost nothing is written to the free cloud storage)."""
     notice = Signal(str)
 
@@ -82,14 +120,13 @@ class LinkManager(QObject):
         self.s, self.cloud, self.bridge = settings, cloud, bridge
         self.linked = set()
         self.counts_path = counts_path
-        self.counts = {}         # "platform:uid" -> {"msgs": n, "paid": n, "regular": bool, "supporter": bool}
-        self.retry_at = {}       # (key, role) -> time before which we do not ask again
+        self.counts = {}
+        self.retry_at = {}
         self.inflight = set()
         self.dirty = False
         self._load()
         bridge.done.connect(self.on_done)
 
-    # ----- local counters -----
     def _load(self):
         try:
             with open(self.counts_path, encoding="utf-8") as f:

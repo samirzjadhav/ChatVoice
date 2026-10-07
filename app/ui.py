@@ -519,7 +519,9 @@ class MainWindow(QWidget):
             card.set_status(text, ok)
         (self.connected.add if ok else self.connected.discard)(platform)
         if ok:
-            self.discord.auto_announce()
+            self.discord.auto_announce(platform)
+        elif not self.connected:
+            self.discord.reset_announce()
         if self.connected and self.live.isHidden():
             self.live.show()
             self.pulse.start()

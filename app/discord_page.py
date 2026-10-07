@@ -1,57 +1,32 @@
-"""The Discord page of ChatVoice: connect the bot, pick roles, link page, announcements."""
+"""The Discord page of ChatVoice: connect the bot, create viewer roles/invites, link page, announcements."""
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QGuiApplication
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-                               QScrollArea, QSpinBox, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSpinBox, QVBoxLayout, QWidget
 
-from .discord import post_webhook, run_bg
-
-
-def _card(title, hint=""):
-    f = QFrame()
-    f.setObjectName("card")
-    lay = QVBoxLayout(f)
-    lay.setContentsMargins(18, 14, 18, 14)
-    t = QLabel(title)
-    t.setStyleSheet("font-size:15px; font-weight:600;")
-    lay.addWidget(t)
-    if hint:
-        h = QLabel(hint)
-        h.setObjectName("hint")
-        h.setWordWrap(True)
-        lay.addWidget(h)
-    return f, lay
-
-
-def _row(*widgets):
-    w = QWidget()
-    lay = QHBoxLayout(w)
-    lay.setContentsMargins(0, 0, 0, 0)
-    for x in widgets:
-        lay.addWidget(x, 1 if isinstance(x, (QLineEdit, QComboBox)) else 0)
-    return w
-
+from .discord import normalize_youtube_url, post_live_announcement, post_webhook, run_bg
+from .theme import DEFAULT_THEME, THEMES
+from .ui_kit import FormScrollArea, bind_switch, field_row, hrow, option_switch_row, section_card
 
 NICE = {"youtube": "YouTube", "twitch": "Twitch", "kick": "Kick"}
 
 
-class DiscordPage(QScrollArea):
+class DiscordPage(FormScrollArea):
     def __init__(self, settings, cloud, bridge, links):
         super().__init__()
         self.s, self.cloud, self.bridge, self.links = settings, cloud, bridge, links
         self._announced = False
-        self.setWidgetResizable(True)
-        self.setFrameShape(QFrame.NoFrame)
         inner = QWidget()
         inner.setObjectName("page")
         self.setWidget(inner)
         lay = QVBoxLayout(inner)
         lay.setContentsMargins(0, 8, 12, 12)
         lay.setSpacing(14)
+        accent = THEMES.get(self.s.get("theme"), THEMES[DEFAULT_THEME])["a1"]
 
-        # 1. server
-        c, cl = _card("1.  Connect your Discord server",
-                      "Paste the cloud address you were given, press 'Add bot', pick your server, then paste the server key shown afterwards.")
+        c, cl = section_card(
+            "Connect your Discord server",
+            "Paste the cloud address, press Add bot, pick your server, then paste the server key shown afterwards.",
+        )
         self.url = QLineEdit(self.s.get("cloud_url"))
         self.url.setPlaceholderText("https://chatvoice-cloud.something.workers.dev")
         self.url.editingFinished.connect(lambda: self.s.set("cloud_url", self.url.text().strip()))
@@ -60,34 +35,44 @@ class DiscordPage(QScrollArea):
         self.key.setPlaceholderText("Server key")
         self.key.editingFinished.connect(lambda: self.s.set("cloud_token", self.key.text().strip()))
         add = QPushButton("Add bot to my server")
+        add.setCursor(Qt.PointingHandCursor)
         add.clicked.connect(self.open_setup)
         test = QPushButton("Test connection")
         test.setObjectName("primary")
+        test.setCursor(Qt.PointingHandCursor)
         test.clicked.connect(self.test)
         self.status = QLabel("Not connected")
         self.status.setObjectName("sub")
         cl.addWidget(self.url)
         cl.addWidget(self.key)
-        cl.addWidget(_row(add, test, self.status))
+        cl.addWidget(hrow(add, test, self.status))
         lay.addWidget(c)
 
-        # 2. roles from normal invite links (recommended)
-        c, cl = _card("2.  Roles from your invite links  (recommended)",
-                      "In Discord create a normal invite (Invite People > Edit invite link > Never expire, No limit). Paste it below and "
-                      "pick a role. Everyone who joins through that invite gets the role automatically (checked every 2 minutes). "
-                      "Put the YouTube invite in your video description, so people who join from YouTube get the YouTube role.")
-        self.inv_edits, self.inv_boxes = {}, {}
+        c, cl = section_card(
+            "Viewer invite roles",
+            "ChatVoice can create the viewer role and a never-expiring, unlimited Discord invite for each platform. "
+            "Choose a channel or leave it on Automatic, then click Create role + invite.",
+        )
+        self.inv_channel = QComboBox()
+        self.inv_channel.addItem("Automatic channel", "")
+        load_channels = QPushButton("Load channels")
+        load_channels.clicked.connect(self.load_channels)
+        self.inv_edits, self.inv_boxes, self.inv_create = {}, {}, {}
+        cl.addWidget(hrow(QLabel("Invite channel"), self.inv_channel, load_channels))
         for src in ("youtube", "twitch", "kick"):
             e = QLineEdit(self.s.get("inv_" + src))
             e.setPlaceholderText("https://discord.gg/...")
             e.editingFinished.connect(lambda k=src, w=e: self.s.set("inv_" + k, w.text().strip()))
             cb = QComboBox()
             cb.addItem("(no role)", "")
+            button = QPushButton("Create role + invite")
+            button.clicked.connect(lambda _checked=False, k=src: self.create_invite(k))
             lab = QLabel(NICE[src])
+            lab.setObjectName("settingName")
             lab.setMinimumWidth(72)
-            self.inv_edits[src], self.inv_boxes[src] = e, cb
-            cl.addWidget(_row(lab, e, cb))
-        save_inv = QPushButton("Save invite roles")
+            self.inv_edits[src], self.inv_boxes[src], self.inv_create[src] = e, cb, button
+            cl.addWidget(hrow(lab, e, cb, button))
+        save_inv = QPushButton("Save invite rules")
         save_inv.setObjectName("primary")
         save_inv.clicked.connect(self.save_invites)
         chk = QPushButton("Check now")
@@ -95,14 +80,15 @@ class DiscordPage(QScrollArea):
         self.istatus = QLabel("")
         self.istatus.setObjectName("sub")
         self.istatus.setWordWrap(True)
-        cl.addWidget(_row(save_inv, chk))
+        cl.addWidget(hrow(save_inv, chk))
         cl.addWidget(self.istatus)
         lay.addWidget(c)
 
-        # 3. chat-activity roles (optional)
-        c, cl = _card("3.  Chat-activity roles  (optional, needs the link page below)",
-                      "Viewers who link their account get the Verified role. Active chatters become Regulars. "
-                      "Anyone who sends a Super Chat or Bits gets the Supporter role. The ChatVoice role must sit above these roles in Discord.")
+        c, cl = section_card(
+            "Chat-activity roles",
+            "Viewers who link their account get Verified. Active chatters become Regular. Paid messages grant Supporter. "
+            "The ChatVoice role must sit above these roles in Discord.",
+        )
         self.boxes = {}
         for key, label in (("role_verified", "Verified (after linking)"), ("role_regular", "Regular (after N messages)"),
                            ("role_supporter", "Supporter (after a paid message)")):
@@ -110,14 +96,15 @@ class DiscordPage(QScrollArea):
             cb.addItem("(none)", "")
             self.boxes[key] = cb
             lab = QLabel(label)
+            lab.setObjectName("settingName")
             lab.setMinimumWidth(210)
             if key == "role_regular":
                 self.n = QSpinBox()
                 self.n.setRange(1, 100000)
                 self.n.setValue(int(self.s.get("regular_msgs")))
-                cl.addWidget(_row(lab, cb, self.n, QLabel("messages")))
+                cl.addWidget(hrow(lab, cb, self.n, QLabel("messages")))
             else:
-                cl.addWidget(_row(lab, cb))
+                cl.addWidget(hrow(lab, cb))
         load = QPushButton("Load my roles")
         load.clicked.connect(self.load_roles)
         save = QPushButton("Save rules")
@@ -125,41 +112,53 @@ class DiscordPage(QScrollArea):
         save.clicked.connect(self.save_rules)
         self.rstatus = QLabel("")
         self.rstatus.setObjectName("sub")
-        cl.addWidget(_row(load, save, self.rstatus))
+        cl.addWidget(hrow(load, save, self.rstatus))
         lay.addWidget(c)
 
-        # 3. link page
-        c, cl = _card("4.  Link page for chat-activity roles  (optional)",
-                      "Share this link in your Discord and stream description. Viewers log in with Discord, get a code, "
-                      "and type  !link CODE  in your stream chat. That proves which chat account is theirs.")
+        c, cl = section_card(
+            "Link page for chat-activity roles",
+            "Share this link in Discord and your stream description. Viewers log in with Discord, get a code, "
+            "and type !link CODE in their stream chat.",
+        )
         self.link = QLineEdit()
         self.link.setReadOnly(True)
         copy = QPushButton("Copy")
         copy.clicked.connect(lambda: QGuiApplication.clipboard().setText(self.link.text()))
-        cl.addWidget(_row(self.link, copy))
+        cl.addWidget(hrow(self.link, copy))
         lay.addWidget(c)
         self.update_link()
 
-        # 4. announcements
-        c, cl = _card("5.  Announcements  (optional)",
-                      "Create a webhook in Discord: channel settings > Integrations > Webhooks > Copy URL.")
+        c, cl = section_card(
+            "Live announcements",
+            "Posts a Discord embed with your custom message and a clickable YouTube live link.",
+        )
         self.hook = QLineEdit(self.s.get("webhook_url"))
         self.hook.setPlaceholderText("https://discord.com/api/webhooks/...")
         self.hook.editingFinished.connect(lambda: self.s.set("webhook_url", self.hook.text().strip()))
+        self.yt = QLineEdit(self.s.get("youtube"))
+        self.yt.setPlaceholderText("https://youtube.com/watch?v=... or a video ID")
+        self.yt.editingFinished.connect(lambda: self.s.set("youtube", self.yt.text().strip()))
         self.text = QLineEdit(self.s.get("announce_text"))
+        self.text.setPlaceholderText("I'm live! Come hang out")
         self.text.editingFinished.connect(lambda: self.s.set("announce_text", self.text.text()))
-        auto = QCheckBox("Announce automatically when I connect to a platform")
-        auto.setChecked(bool(self.s.get("announce_auto")))
-        auto.toggled.connect(lambda v: self.s.set("announce_auto", v))
-        paid = QCheckBox("Post Super Chats / Bits to Discord")
-        paid.setChecked(bool(self.s.get("post_super")))
-        paid.toggled.connect(lambda v: self.s.set("post_super", v))
+        cl.addWidget(field_row("Webhook URL", "Where live announcements are posted.", self.hook))
+        cl.addWidget(field_row("YouTube live link", "The YouTube URL used as the embed link.", self.yt))
+        cl.addWidget(field_row("Custom message", "Shown as the main embed description.", self.text))
+        cl.addWidget(option_switch_row(
+            "Announce automatically when YouTube connects",
+            "Posts the embed when the YouTube chat connects.",
+            bind_switch(self.s, "announce_auto", accent),
+        ))
+        cl.addWidget(option_switch_row(
+            "Post Super Chats / Bits to Discord",
+            "Forwards paid messages to the same webhook.",
+            bind_switch(self.s, "post_super", accent),
+        ))
         now = QPushButton("Announce now")
         now.clicked.connect(self.announce_now)
         self.hstatus = QLabel("")
         self.hstatus.setObjectName("sub")
-        for w in (self.hook, self.text, auto, paid, _row(now, self.hstatus)):
-            cl.addWidget(w)
+        cl.addWidget(hrow(now, self.hstatus))
         lay.addWidget(c)
         lay.addStretch(1)
         bridge.done.connect(self.on_done)
@@ -179,8 +178,21 @@ class DiscordPage(QScrollArea):
 
     def test(self):
         self._save_conn()
-        self.status.setText("Checking...")
+        self.status.setText("Checking bot and server...")
         run_bg(self.bridge, "ui:test", lambda: self.cloud.call("GET", "/api/config"))
+
+    def load_channels(self):
+        self._save_conn()
+        self.istatus.setText("Loading channels...")
+        run_bg(self.bridge, "ui:channels", lambda: self.cloud.call("GET", "/api/channels"))
+
+    def create_invite(self, src):
+        self._save_conn()
+        self.istatus.setText("Creating %s role and invite..." % NICE[src])
+        channel_id = self.inv_channel.currentData() or ""
+        run_bg(self.bridge, "ui:create_inv:%s" % src,
+               lambda src=src, channel_id=channel_id: self.cloud.call("POST", "/api/invite-setup",
+                                                                       {"platform": src, "channelId": channel_id}))
 
     def load_roles(self):
         self._save_conn()
@@ -207,7 +219,7 @@ class DiscordPage(QScrollArea):
             self.s.set("inv_role_" + src, role)
             if code:
                 if not role:
-                    self.istatus.setText("Pick a role for the %s invite first (press 'Load my roles' if the list is empty)" % NICE[src])
+                    self.istatus.setText("Pick a role for the %s invite first, or use 'Create role + invite'." % NICE[src])
                     return
                 rules.append({"code": code, "role": role, "label": NICE[src]})
         self.istatus.setText("Saving...")
@@ -220,16 +232,22 @@ class DiscordPage(QScrollArea):
 
     def announce_now(self):
         self.s.set("webhook_url", self.hook.text().strip())
+        self.s.set("youtube", self.yt.text().strip())
         self.s.set("announce_text", self.text.text())
-        self.hstatus.setText("Sending...")
-        url, txt = self.s.get("webhook_url"), self.s.get("announce_text")
-        run_bg(self.bridge, "ui:hook", lambda: post_webhook(url, "🔴 " + txt))
+        self.hstatus.setText("Sending embed...")
+        url, txt, yt = self.s.get("webhook_url"), self.s.get("announce_text"), self.s.get("youtube")
+        run_bg(self.bridge, "ui:hook", lambda: post_live_announcement(url, txt, yt))
 
-    def auto_announce(self):
-        """Called by the main window when the first platform connects."""
-        if self.s.get("announce_auto") and self.s.get("webhook_url") and not self._announced:
+    def auto_announce(self, platform=None):
+        if platform and platform != "youtube":
+            return
+        yt = self.s.get("youtube") or ""
+        if self.s.get("announce_auto") and self.s.get("webhook_url") and yt and not self._announced:
             self._announced = True
             self.announce_now()
+
+    def reset_announce(self):
+        self._announced = False
 
     def post_paid(self, m):
         if self.s.get("post_super") and self.s.get("webhook_url"):
@@ -279,9 +297,48 @@ class DiscordPage(QScrollArea):
                     self.s.set("inv_role_" + src, rule["role"])
             if cfg.get("regularMsgs"):
                 self.n.setValue(int(cfg["regularMsgs"]))
-            self.status.setText("Connected to %s" % res["guildName"])
+            self.status.setText("Connected to %s • checking bot..." % res["guildName"])
             self.update_link()
             self.links.refresh()
+            self.load_roles()
+            run_bg(self.bridge, "ui:bot", lambda: self.cloud.call("GET", "/api/bot-status"))
+        elif tag == "ui:bot":
+            if err:
+                self.status.setText("Server connected • %s" % err)
+            else:
+                self.status.setText("Connected to %s • Bot ready" % self.s.get("guild_name"))
+        elif tag == "ui:channels":
+            if err:
+                self.istatus.setText(err)
+                return
+            current = self.inv_channel.currentData() or ""
+            self.inv_channel.blockSignals(True)
+            self.inv_channel.clear()
+            self.inv_channel.addItem("Automatic channel", "")
+            for c in res.get("channels", []):
+                self.inv_channel.addItem("#" + c["name"], c["id"])
+            idx = self.inv_channel.findData(current)
+            self.inv_channel.setCurrentIndex(max(0, idx))
+            self.inv_channel.blockSignals(False)
+            self.istatus.setText("%d invite channels loaded" % len(res.get("channels", [])))
+        elif tag.startswith("ui:create_inv:"):
+            src = tag.split(":", 2)[2]
+            if err:
+                self.istatus.setText(err)
+                return
+            self.inv_edits[src].setText(res.get("inviteUrl", ""))
+            self.s.set("inv_" + src, res.get("inviteUrl", ""))
+            role = res.get("role") or {}
+            self.s.set("inv_role_" + src, role.get("id", ""))
+            if role.get("id"):
+                cb = self.inv_boxes[src]
+                idx = cb.findData(role["id"])
+                if idx < 0:
+                    cb.addItem(role.get("name", NICE[src] + " Viewer"), role["id"])
+                    idx = cb.findData(role["id"])
+                cb.setCurrentIndex(idx)
+            status = "Reused" if res.get("reused") else "Created"
+            self.istatus.setText("%s %s Viewer role + invite: %s" % (status, NICE[src], res.get("inviteUrl", "")))
             self.load_roles()
         elif tag == "ui:roles":
             if err:

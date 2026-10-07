@@ -4,6 +4,8 @@
 
 const API = "https://discord.com/api/v10";
 const PLATFORMS = ["youtube", "twitch", "kick"];
+const PLATFORM_NAMES = { youtube: "YouTube", twitch: "Twitch", kick: "Kick" };
+const BOT_INSTALL_PERMISSIONS = "268435489"; // Manage Server + Manage Roles + Create Instant Invite
 const enc = new TextEncoder();
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
@@ -286,6 +288,92 @@ async function grantRole(env, guildId, userId, roleId) {
   return { ok: r.status === 204 || r.status === 200, status: r.status };
 }
 
+async function findOrCreateViewerRole(env, guildId, platform) {
+  const roleName = `${PLATFORM_NAMES[platform]} Viewer`;
+  const listed = await bot(env, "GET", `/guilds/${guildId}/roles`);
+  if (!listed.ok) return { error: `Could not read server roles (Discord ${listed.status}).` };
+  const roles = await listed.json();
+  const existing = roles.find((r) => !r.managed && r.name === roleName);
+  if (existing) return { id: existing.id, name: existing.name, created: false };
+
+  const created = await bot(env, "POST", `/guilds/${guildId}/roles`, {
+    name: roleName,
+    permissions: "0",
+    color: 0,
+    hoist: false,
+    mentionable: false,
+  });
+  if (!created.ok) {
+    let detail = "";
+    try { const j = await created.json(); detail = j.message || j.code ? `: ${j.message || j.code}` : ""; } catch (_) {}
+    if (created.status === 403) detail = " The bot needs Manage Roles, and its ChatVoice role must stay above the roles it manages." + detail;
+    return { error: `Could not create ${roleName} role (Discord ${created.status}).${detail}` };
+  }
+  const role = await created.json();
+  return { id: role.id, name: role.name, created: true };
+}
+
+async function createInvite(env, guildId, channelId, platform) {
+  const channels = await bot(env, "GET", `/guilds/${guildId}/channels`);
+  if (!channels.ok) return { error: `Could not read server channels (Discord ${channels.status}).` };
+  const channelList = await channels.json();
+  const channel = channelList.find((c) => String(c.id) === String(channelId)) ||
+    channelList.find((c) => c.type === 0 || c.type === 5);
+  if (!channel) return { error: "No text channel is available for creating the invite. Give the bot access to a normal text channel." };
+
+  const made = await bot(env, "POST", `/channels/${channel.id}/invites`, {
+    max_age: 0,
+    max_uses: 0,
+    temporary: false,
+    unique: true,
+  });
+  if (!made.ok) {
+    let detail = "";
+    try { const j = await made.json(); detail = j.message ? `: ${j.message}` : ""; } catch (_) {}
+    if (made.status === 403) detail = " Give the bot Create Instant Invite permission for the selected channel." + detail;
+    return { error: `Could not create the ${PLATFORM_NAMES[platform]} invite (Discord ${made.status}).${detail}` };
+  }
+  const invite = await made.json();
+  return { code: invite.code, url: `https://discord.gg/${invite.code}`, channelId: channel.id, channelName: channel.name || "channel" };
+}
+
+async function setupInviteRole(env, guildId, platform, channelId, guild) {
+  if (!PLATFORMS.includes(platform)) return { error: "bad platform" };
+
+  const role = await findOrCreateViewerRole(env, guildId, platform);
+  if (role.error) return role;
+
+  const rules = Array.isArray(guild.config?.inviteRules) ? [...guild.config.inviteRules] : [];
+  const current = rules.find((r) => String(r.label || "").toLowerCase() === PLATFORM_NAMES[platform].toLowerCase());
+
+  // Reuse a configured invite when Discord still has it.
+  if (current && current.code) {
+    const check = await bot(env, "GET", `/guilds/${guildId}/invites`);
+    if (check.ok) {
+      const invites = await check.json();
+      if (invites.some((i) => i.code === current.code)) {
+        const next = rules.map((r) => r === current ? { ...r, role: role.id, label: PLATFORM_NAMES[platform] } : r);
+        guild.config.inviteRules = next;
+        await kvPut(env, "guild:" + guildId, guild);
+        cache.set("g:" + guildId, { exp: Date.now() + 30000, val: guild });
+        const found = invites.find((i) => i.code === current.code);
+        return { ok: true, reused: true, role, inviteUrl: `https://discord.gg/${current.code}`, code: current.code, channelId: found?.channel?.id || "", channelName: found?.channel?.name || "" };
+      }
+    }
+  }
+
+  const invite = await createInvite(env, guildId, channelId, platform);
+  if (invite.error) return invite;
+  const nextRule = { code: invite.code, role: role.id, label: PLATFORM_NAMES[platform] };
+  const filtered = rules.filter((r) => String(r.label || "").toLowerCase() !== PLATFORM_NAMES[platform].toLowerCase());
+  guild.config.inviteRules = [...filtered, nextRule].slice(0, 6);
+  const idx = (await kvGet(env, "idx:invites")) || [];
+  if (!idx.includes(guildId)) await kvPut(env, "idx:invites", [...idx, guildId]);
+  await kvPut(env, "guild:" + guildId, guild);
+  cache.set("g:" + guildId, { exp: Date.now() + 30000, val: guild });
+  return { ok: true, reused: false, role, code: invite.code, inviteUrl: invite.url, channelId: invite.channelId, channelName: invite.channelName };
+}
+
 // ---------------- pages (browser) ----------------
 const loginProblem = (e) => page("Discord login failed",
   `<p>${esc(e.message)}</p><p>Check these, then try again:</p><ul>
@@ -316,7 +404,7 @@ async function setupStart(env, origin) {
   const state = randomString(24, "abcdef0123456789");
   await kvPut(env, "state:" + state, { kind: "setup" }, 600);
   return Response.redirect(
-    authorizeUrl(env, origin + "/setup/callback", "bot identify", state, { permissions: "268435488" }), 302);
+    authorizeUrl(env, origin + "/setup/callback", "bot identify", state, { permissions: BOT_INSTALL_PERMISSIONS }), 302);
 }
 
 async function setupCallback(env, origin, url) {
@@ -336,7 +424,7 @@ async function setupCallback(env, origin, url) {
   await kvPut(env, "token:" + token, guildId);
   return page("Bot added to " + tok.guild.name,
     `<p>Copy this <b>server key</b> into ChatVoice (Discord page). Keep it private:</p><code>${esc(token)}</code>
-     <p>Important: in Discord, drag the <b>ChatVoice</b> role above the roles it should give out.</p>`);
+     <p>ChatVoice needs <b>Manage Roles</b> and <b>Create Instant Invite</b>. Keep the <b>ChatVoice</b> role above the viewer roles.</p>`);
 }
 
 async function linkStart(env, origin, guildId) {
@@ -473,6 +561,33 @@ async function api(request, env, url) {
     await kvPut(env, "guild:" + guildId, guild);
     cache.set("g:" + guildId, { exp: Date.now() + 30000, val: guild });
     return json({ ok: true, config: publicConfig() });
+  }
+
+  if (route === "GET /api/bot-status") {
+    const me = await bot(env, "GET", "/users/@me");
+    if (me.status === 401) return json({ connected: false, status: 401, error: "The Discord bot token is invalid or was reset." }, 502);
+    if (!me.ok) return json({ connected: false, status: me.status, error: "Discord could not verify the bot." }, 502);
+    const guildCheck = await bot(env, "GET", `/guilds/${guildId}`);
+    if (guildCheck.status === 404) return json({ connected: false, status: 404, error: "The ChatVoice bot is no longer in this server. Add it again." }, 409);
+    if (!guildCheck.ok) return json({ connected: false, status: guildCheck.status, error: "The bot cannot access this server." }, 502);
+    const user = await me.json();
+    return json({ connected: true, botName: user.global_name || user.username || "ChatVoice", botId: user.id });
+  }
+
+  if (route === "GET /api/channels") {
+    const r = await bot(env, "GET", `/guilds/${guildId}/channels`);
+    if (!r.ok) return json({ error: `could not read channels (Discord ${r.status})` }, 502);
+    const channels = (await r.json())
+      .filter((c) => c.type === 0 || c.type === 5)
+      .sort((a, b) => (a.position || 0) - (b.position || 0))
+      .map((c) => ({ id: c.id, name: c.name }));
+    return json({ channels });
+  }
+
+  if (route === "POST /api/invite-setup") {
+    const result = await setupInviteRole(env, guildId, String(body.platform || "").toLowerCase(), String(body.channelId || ""), guild);
+    if (result.error) return json({ error: result.error }, 400);
+    return json(result);
   }
 
   if (route === "GET /api/roles") {
